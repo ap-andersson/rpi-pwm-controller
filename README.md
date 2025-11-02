@@ -3,6 +3,10 @@
 
 This project provides a simple PWM fan controller for the Raspberry Pi, running in a Docker container.
 
+Gemini was used heavily to develop this and is created specifically for Raspberry PI 5. Any other version of the RPI may need changes for this to work. 
+
+The purpose of the prometheus endpoint is that I already have a script that publishes the ambient temperature in a box outside, where the PI is located. And this is a fan that sucks air into the box to regulate the ambient temperature. Thus I did not want to use the CPU temperature in this case.
+
 ## Prerequisites
 
 This project uses the modern `gpiod` command-line tools, which are the official way to handle GPIO on recent versions of Raspberry Pi OS. The included Dockerfile handles the installation of all necessary dependencies.
@@ -33,13 +37,14 @@ Note: On my Noctua NF-A6x25 PWM fan if setting low values on duty cycle it wil s
 1.  Connect your PWM fan to the configured GPIO pin.
 2.  Clone this repository to your Raspberry Pi.
 3.  Navigate to the project directory.
-4.  Run the following command:
+4.  Run command that will build the Docker image and run the controller in the background.
 
     ```bash
     docker-compose up -d
     ```
 
-This will build the Docker image and run the controller in the background.
+
+### Other commands
 
 To view the logs, run:
 
