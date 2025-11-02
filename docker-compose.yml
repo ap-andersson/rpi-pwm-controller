@@ -1,6 +1,7 @@
 
 services:
   pwm-controller:
+    container_name: pwm-controller
     build: .
     restart: unless-stopped
     privileged: true
