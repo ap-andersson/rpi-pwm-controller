@@ -9,7 +9,7 @@ The purpose of the prometheus endpoint is that I already have a script that publ
 
 ## Prerequisites
 
-This project uses the modern `gpiod` command-line tools, which are the official way to handle GPIO on recent versions of Raspberry Pi OS. The included Dockerfile handles the installation of all necessary dependencies.
+This project uses the `lgpio` library, which is the modern and recommended way to handle GPIO on recent versions of Raspberry Pi OS. The included Dockerfile handles the installation of all necessary dependencies.
 
 Ensure your user has permissions to access GPIO. When using the provided `docker-compose.yml`, this is handled by running the container in `privileged` mode.
 
