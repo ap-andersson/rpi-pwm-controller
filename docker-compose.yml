@@ -1,0 +1,19 @@
+
+services:
+  pwm-controller:
+    build: .
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /sys/class/thermal:/sys/class/thermal:ro
+    environment:
+      #- STATIC_DUTY_CYCLE=100
+      - TEMP_ON_THRESHOLD=25
+      - TEMP_OFF_THRESHOLD=15
+      - THRESHOLD_ON_DUTY_CYCLE=60
+      - THRESHOLD_OFF_DUTY_CYCLE=8
+      - UPDATE_INTERVAL=60
+      - PWM_GPIO=12
+      - PWM_FREQUENCY=100
+      - PROMETHEUS_ENDPOINT=<url>
+      - PROMETHEUS_METRIC_NAME=temperature
