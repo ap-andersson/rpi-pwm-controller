@@ -9,7 +9,7 @@ The purpose of the prometheus endpoint is that I already have a script that publ
 
 ## Prerequisites
 
-This project uses the `lgpio` library, which is the modern and recommended way to handle GPIO on recent versions of Raspberry Pi OS. The included Dockerfile handles the installation of all necessary dependencies.
+This project uses the `lgpio` library to handle GPIO pins on Raspberry Pi 5. The included Dockerfile handles the installation of all necessary dependencies.
 
 Ensure your user has permissions to access GPIO. When using the provided `docker-compose.yml`, this is handled by running the container in `privileged` mode.
 
@@ -22,13 +22,13 @@ The fan controller is configured using environment variables in the `docker-comp
 | `STATIC_DUTY_CYCLE` | Set a static fan speed (0-100). If this is set, the temperature-based control is disabled. | (none) |
 | `TEMP_ON_THRESHOLD` | The CPU temperature (°C) at which to turn the fan on. | `65` |
 | `TEMP_OFF_THRESHOLD` | The CPU temperature (°C) at which to turn the fan off. | `55` |
-| `UPDATE_INTERVAL` | The interval in seconds at which to check the CPU temperature. | `5` |
+| `UPDATE_INTERVAL` | The interval in seconds at which to check the CPU temperature. | `60` |
 | `PWM_GPIO` | The GPIO pin connected to the fan's PWM control wire. | `18` |
 | `PWM_FREQUENCY` | The PWM frequency in Hz. Most fans work well with a wide range of frequencies. A value of `100` Hz is a safe default. | `100` |
 | `PROMETHEUS_ENDPOINT` | The URL of a Prometheus exporter endpoint to fetch a temperature metric from. If set, this will be used instead of the CPU temperature. | (none) |
 | `PROMETHEUS_METRIC_NAME` | The name of the metric to fetch from the Prometheus endpoint. | (none) |
 | `THRESHOLD_ON_DUTY_CYCLE` | The fan speed (0-100) to set when the temperature exceeds `TEMP_ON_THRESHOLD`. | `100` |
-| `THRESHOLD_OFF_DUTY_CYCLE` | The fan speed (0-100) to set when the temperature drops below `TEMP_OFF_THRESHOLD`. | `IDLE_DUTY_CYCLE` |
+| `THRESHOLD_OFF_DUTY_CYCLE` | The fan speed (0-100) to set when the temperature drops below `TEMP_OFF_THRESHOLD`. | `20` |
 
 Note: On my Noctua NF-A6x25 PWM fan if setting low values on duty cycle it wil start/stop. Around duty cycle 6-8 it seems to stop needing to do that, so I use duty cycle 8 as my THRESHOLD_ON_DUTY_CYCLE. I prefer to not stop the fan if I can avoid it, to keep air moving. 
 

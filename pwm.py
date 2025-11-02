@@ -10,16 +10,12 @@ PWM_FREQUENCY = int(os.getenv("PWM_FREQUENCY", 100))
 STATIC_DUTY_CYCLE = os.getenv("STATIC_DUTY_CYCLE")
 TEMP_ON_THRESHOLD = float(os.getenv("TEMP_ON_THRESHOLD", 60.0))
 TEMP_OFF_THRESHOLD = float(os.getenv("TEMP_OFF_THRESHOLD", 50.0))
-IDLE_DUTY_CYCLE = float(os.getenv("IDLE_DUTY_CYCLE", 0.0))
 TEMP_FILE = os.getenv("TEMP_FILE", "/sys/class/thermal/thermal_zone0/temp")
-UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", 5))
+UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", 60))
 PROMETHEUS_ENDPOINT = os.getenv("PROMETHEUS_ENDPOINT")
 PROMETHEUS_METRIC_NAME = os.getenv("PROMETHEUS_METRIC_NAME")
 THRESHOLD_ON_DUTY_CYCLE = float(os.getenv("THRESHOLD_ON_DUTY_CYCLE", 100.0))
-THRESHOLD_OFF_DUTY_CYCLE = float(os.getenv("THRESHOLD_OFF_DUTY_CYCLE", IDLE_DUTY_CYCLE))
-
-if not 0 <= IDLE_DUTY_CYCLE <= 100:
-    raise ValueError("IDLE_DUTY_CYCLE must be between 0 and 100")
+THRESHOLD_OFF_DUTY_CYCLE = float(os.getenv("THRESHOLD_OFF_DUTY_CYCLE", 20.0))
 
 if not 0 <= THRESHOLD_ON_DUTY_CYCLE <= 100:
     raise ValueError("THRESHOLD_ON_DUTY_CYCLE must be between 0 and 100")
@@ -123,9 +119,10 @@ def cleanup(signum=None, frame=None):
     """Cleans up GPIO resources."""
     print("Shutting down gracefully...")
     if h:
-        set_fan_speed(0)
+        set_fan_speed(THRESHOLD_ON_DUTY_CYCLE)
         lgpio.gpio_free(h, PWM_GPIO)
         lgpio.gpiochip_close(h)
+        print(f"Set fan speed to THRESHOLD_ON_DUTY_CYCLE ({THRESHOLD_ON_DUTY_CYCLE})")
     exit(0)
 
 def initialize_threshold_mode():
