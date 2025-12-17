@@ -17,6 +17,12 @@ PROMETHEUS_METRIC_NAME = os.getenv("PROMETHEUS_METRIC_NAME")
 THRESHOLD_ON_DUTY_CYCLE = float(os.getenv("THRESHOLD_ON_DUTY_CYCLE", 100.0))
 THRESHOLD_OFF_DUTY_CYCLE = float(os.getenv("THRESHOLD_OFF_DUTY_CYCLE", 20.0))
 
+# Heating specific settings
+HEATING_ENABLED = os.getenv("HEATING_ENABLED", "false").lower() == "true"
+HEATING_ON_THRESHOLD = float(os.getenv("HEATING_ON_THRESHOLD", 0.0))
+HEATING_OFF_THRESHOLD = float(os.getenv("HEATING_OFF_THRESHOLD", 0.0))
+HEATING_GPIO = int(os.getenv("HEATING_GPIO", 0))
+
 if not 0 <= THRESHOLD_ON_DUTY_CYCLE <= 100:
     raise ValueError("THRESHOLD_ON_DUTY_CYCLE must be between 0 and 100")
 
@@ -26,6 +32,7 @@ if not 0 <= THRESHOLD_OFF_DUTY_CYCLE <= 100:
 # Global state
 h = None  # lgpio handle
 high_speed_mode = False
+current_duty_cycle = 0.0
 
 def get_prometheus_temperature():
     """Fetches temperature from a Prometheus endpoint."""
@@ -62,15 +69,17 @@ def get_temperature():
 
 def set_fan_speed(duty_cycle):
     """Sets the fan speed using PWM."""
-    global h
+    global h, current_duty_cycle
     # Ensure duty cycle is within 0-100 range
     duty_cycle = max(0, min(100, duty_cycle))
-    
+    current_duty_cycle = duty_cycle
+
     if h:
         try:
             lgpio.tx_pwm(h, PWM_GPIO, PWM_FREQUENCY, duty_cycle)
         except Exception as e:
             print(f"Error setting fan speed: {e}")
+
 
 def handle_static_mode():
     """Handles the static fan speed mode."""
@@ -80,28 +89,57 @@ def handle_static_mode():
             raise ValueError("Duty cycle must be between 0 and 100")
         print(f"Setting static duty cycle to {duty_cycle}%")
         set_fan_speed(duty_cycle)
-        # Keep the script running
-        while True:
-            time.sleep(1)
     except (ValueError, TypeError) as e:
         print(f"Invalid STATIC_DUTY_CYCLE: {e}")
         cleanup()
         exit(1)
 
-def handle_threshold_mode():
-    """Handles the temperature-based threshold mode."""
+
+def handle_threshold_mode(temp):
+    """Handles the temperature-based threshold mode and returns True if fan speed changed."""
     global high_speed_mode
-    temp = get_temperature()
     if temp is not None:
-        print(f"Current temperature: {temp:.2f}°C")
         if temp > TEMP_ON_THRESHOLD and not high_speed_mode:
-            print(f"Temperature ({temp:.2f}°C) exceeded ON threshold ({TEMP_ON_THRESHOLD}°C). Setting fan to {THRESHOLD_ON_DUTY_CYCLE}%.")
+            print(
+                f"Temperature ({temp:.2f}°C) exceeded ON threshold ({TEMP_ON_THRESHOLD}°C). "
+                f"Setting fan to {THRESHOLD_ON_DUTY_CYCLE}%."
+            )
             set_fan_speed(THRESHOLD_ON_DUTY_CYCLE)
             high_speed_mode = True
         elif temp < TEMP_OFF_THRESHOLD and high_speed_mode:
-            print(f"Temperature ({temp:.2f}°C) below OFF threshold ({TEMP_OFF_THRESHOLD}°C). Setting fan to {THRESHOLD_OFF_DUTY_CYCLE}%.")
+            print(
+                f"Temperature ({temp:.2f}°C) below OFF threshold ({TEMP_OFF_THRESHOLD}°C). "
+                f"Setting fan to {THRESHOLD_OFF_DUTY_CYCLE}%."
+            )
             set_fan_speed(THRESHOLD_OFF_DUTY_CYCLE)
             high_speed_mode = False
+
+
+heating_on = False
+
+
+def handle_heating_mode(temp):
+    """Handles the temperature-based heating mode and returns True if state changed."""
+    global heating_on
+    if not HEATING_ENABLED:
+        return False
+
+    if temp is not None:
+        if temp < HEATING_ON_THRESHOLD and not heating_on:
+            print(
+                f"Temperature ({temp:.2f}°C) below heating ON threshold ({HEATING_ON_THRESHOLD}°C). "
+                "Turning heating ON."
+            )
+            lgpio.gpio_write(h, HEATING_GPIO, 1)
+            heating_on = True
+        elif temp > HEATING_OFF_THRESHOLD and heating_on:
+            print(
+                f"Temperature ({temp:.2f}°C) above heating OFF threshold ({HEATING_OFF_THRESHOLD}°C). "
+                "Turning heating OFF."
+            )
+            lgpio.gpio_write(h, HEATING_GPIO, 0)
+            heating_on = False
+
 
 def setup():
     """Sets up the GPIO pin and PWM."""
@@ -109,6 +147,9 @@ def setup():
     try:
         h = lgpio.gpiochip_open(0)
         lgpio.gpio_claim_output(h, PWM_GPIO)
+        if HEATING_ENABLED:
+            lgpio.gpio_claim_output(h, HEATING_GPIO)
+            print("Claimed HEATING_GPIO pin")
         print("GPIO setup complete.")
     except Exception as e:
         print(f"Error setting up GPIO: {e}")
@@ -120,10 +161,15 @@ def cleanup(signum=None, frame=None):
     print("Shutting down gracefully...")
     if h:
         set_fan_speed(THRESHOLD_ON_DUTY_CYCLE)
+        if HEATING_ENABLED:
+            lgpio.gpio_write(h, HEATING_GPIO, 0)
+            lgpio.gpio_free(h, HEATING_GPIO)
+            print("Released HEATING_GPIO pin")
         lgpio.gpio_free(h, PWM_GPIO)
         lgpio.gpiochip_close(h)
         print(f"Set fan speed to THRESHOLD_ON_DUTY_CYCLE ({THRESHOLD_ON_DUTY_CYCLE})")
     exit(0)
+
 
 def initialize_threshold_mode():
     """Sets the initial fan speed for threshold mode."""
@@ -136,6 +182,9 @@ def initialize_threshold_mode():
     else:
         print(f"Setting fan to {THRESHOLD_OFF_DUTY_CYCLE}%.")
         set_fan_speed(THRESHOLD_OFF_DUTY_CYCLE)
+    if HEATING_ENABLED:
+        handle_heating_mode(temp)
+
 
 def main():
     """Main function."""
@@ -145,13 +194,32 @@ def main():
     setup()
 
     if STATIC_DUTY_CYCLE is not None:
+        print("Starting static fan control.")
         handle_static_mode()
     else:
         print("Starting temperature-based fan control.")
         initialize_threshold_mode()
-        while True:
-            handle_threshold_mode()
-            time.sleep(UPDATE_INTERVAL)
+
+    while True:
+        temp = get_temperature()
+
+        if temp is not None:
+            if STATIC_DUTY_CYCLE is None:
+                handle_threshold_mode(temp)
+            handle_heating_mode(temp)
+            fan_status = f"{current_duty_cycle}%"
+            log_message = f"Temp: {temp:.2f}°C, Fan: {fan_status}"
+
+            if HEATING_ENABLED:
+                heating_status = "ON" if heating_on else "OFF"
+                log_message += f", Heating: {heating_status}"
+
+            print(log_message)
+        
+        else:
+            print("temp was None, skipping this run")
+
+        time.sleep(UPDATE_INTERVAL)
 
 if __name__ == "__main__":
     main()
