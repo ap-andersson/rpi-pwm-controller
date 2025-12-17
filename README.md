@@ -30,6 +30,15 @@ The fan controller is configured using environment variables in the `docker-comp
 | `THRESHOLD_ON_DUTY_CYCLE` | The fan speed (0-100) to set when the temperature exceeds `TEMP_ON_THRESHOLD`. | `100` |
 | `THRESHOLD_OFF_DUTY_CYCLE` | The fan speed (0-100) to set when the temperature drops below `TEMP_OFF_THRESHOLD`. | `20` |
 
+### Heating Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `HEATING_ENABLED` | Enable the heating functionality. | `false` |
+| `HEATING_GPIO` | The GPIO pin connected to the heating element's control relay/switch. | `0` |
+| `HEATING_ON_THRESHOLD` | The temperature (°C) at which to turn the heating on. | `0` |
+| `HEATING_OFF_THRESHOLD` | The temperature (°C) at which to turn the heating off. | `0` |
+
 Note: On my Noctua NF-A6x25 PWM fan if setting low values on duty cycle it wil start/stop. Around duty cycle 6-8 it seems to stop needing to do that, so I use duty cycle 8 as my THRESHOLD_ON_DUTY_CYCLE. I prefer to not stop the fan if I can avoid it, to keep air moving. 
 
 ## Running the Controller
