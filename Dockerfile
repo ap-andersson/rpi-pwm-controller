@@ -1,4 +1,7 @@
-FROM python:3.11-slim-trixie
+FROM python:3.12-slim-trixie
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
@@ -6,4 +9,4 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY pwm.py .
-CMD ["python", "-u", "pwm.py"]
+CMD ["python", "pwm.py"]

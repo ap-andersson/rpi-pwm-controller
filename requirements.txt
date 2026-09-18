@@ -1,2 +1,2 @@
-lgpio
-requests
+lgpio==0.2.2.0
+requests==2.34.2
