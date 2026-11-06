@@ -18,3 +18,6 @@ services:
       - PWM_FREQUENCY=100
       - PROMETHEUS_ENDPOINT=<url>
       - PROMETHEUS_METRIC_NAME=temperature
+      # Failsafe when the temperature source stops answering
+      #- FAILSAFE_AFTER_FAILURES=3
+      #- FAILSAFE_CPU_TEMP=70

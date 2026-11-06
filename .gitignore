@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local overrides
+docker-compose.override.yml
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

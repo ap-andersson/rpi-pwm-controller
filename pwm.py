@@ -1,8 +1,11 @@
 import os
 import time
 import signal
+import logging
 import lgpio
 import requests
+
+log = logging.getLogger("pwm")
 
 # Configuration
 PWM_GPIO = int(os.getenv("PWM_GPIO", 18))
@@ -16,6 +19,11 @@ PROMETHEUS_ENDPOINT = os.getenv("PROMETHEUS_ENDPOINT")
 PROMETHEUS_METRIC_NAME = os.getenv("PROMETHEUS_METRIC_NAME")
 THRESHOLD_ON_DUTY_CYCLE = float(os.getenv("THRESHOLD_ON_DUTY_CYCLE", 100.0))
 THRESHOLD_OFF_DUTY_CYCLE = float(os.getenv("THRESHOLD_OFF_DUTY_CYCLE", 20.0))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Failsafe: what to do when the temperature source stops answering
+FAILSAFE_AFTER_FAILURES = int(os.getenv("FAILSAFE_AFTER_FAILURES", 3))
+FAILSAFE_CPU_TEMP = float(os.getenv("FAILSAFE_CPU_TEMP", 70.0))
 
 # Heating specific settings
 HEATING_ENABLED = os.getenv("HEATING_ENABLED", "false").lower() == "true"
@@ -33,6 +41,11 @@ if not 0 <= THRESHOLD_OFF_DUTY_CYCLE <= 100:
 h = None  # lgpio handle
 high_speed_mode = False
 current_duty_cycle = 0.0
+heating_on = False
+failsafe_active = False
+consecutive_failures = 0
+claimed_pins = []
+
 
 def get_prometheus_temperature():
     """Fetches temperature from a Prometheus endpoint."""
@@ -44,28 +57,37 @@ def get_prometheus_temperature():
                 parts = line.split()
                 if len(parts) >= 2:
                     return float(parts[1])
-        print(f"Metric '{PROMETHEUS_METRIC_NAME}' not found in Prometheus endpoint.")
+        log.warning("Metric '%s' not found in Prometheus endpoint.", PROMETHEUS_METRIC_NAME)
         return None
     except (requests.RequestException, ValueError) as e:
-        print(f"Error getting temperature from Prometheus: {e}")
+        log.warning("Error getting temperature from Prometheus: %s", e)
         return None
 
 
-def get_temperature():
-    """Gets the temperature from Prometheus if configured, otherwise from the CPU."""
-    if PROMETHEUS_ENDPOINT and PROMETHEUS_METRIC_NAME:
-        temp = get_prometheus_temperature()
-        if temp is not None:
-            return temp
-        print("Falling back to CPU temperature.")
-
+def get_cpu_temperature():
+    """Reads the CPU temperature from the thermal zone file."""
     try:
         with open(TEMP_FILE, "r") as f:
             temp_str = f.read()
         return float(temp_str) / 1000.0
     except (IOError, ValueError) as e:
-        print(f"Error reading CPU temperature: {e}")
+        log.warning("Error reading CPU temperature: %s", e)
         return None
+
+
+def get_temperature():
+    """Gets the temperature from the primary source.
+
+    That is the Prometheus metric when one is configured, otherwise the CPU
+    sensor. There is deliberately no silent fallback from Prometheus to the CPU:
+    they measure different things, and substituting a ~30C SoC reading for an
+    ambient one would run the fan and disable the heating on bad data. When the
+    primary source fails, the failsafe takes over instead.
+    """
+    if PROMETHEUS_ENDPOINT and PROMETHEUS_METRIC_NAME:
+        return get_prometheus_temperature()
+    return get_cpu_temperature()
+
 
 def set_fan_speed(duty_cycle):
     """Sets the fan speed using PWM."""
@@ -78,7 +100,7 @@ def set_fan_speed(duty_cycle):
         try:
             lgpio.tx_pwm(h, PWM_GPIO, PWM_FREQUENCY, duty_cycle)
         except Exception as e:
-            print(f"Error setting fan speed: {e}")
+            log.error("Error setting fan speed: %s", e)
 
 
 def handle_static_mode():
@@ -87,58 +109,109 @@ def handle_static_mode():
         duty_cycle = float(STATIC_DUTY_CYCLE)
         if not 0 <= duty_cycle <= 100:
             raise ValueError("Duty cycle must be between 0 and 100")
-        print(f"Setting static duty cycle to {duty_cycle}%")
+        log.info("Setting static duty cycle to %s%%", duty_cycle)
         set_fan_speed(duty_cycle)
     except (ValueError, TypeError) as e:
-        print(f"Invalid STATIC_DUTY_CYCLE: {e}")
+        log.error("Invalid STATIC_DUTY_CYCLE: %s", e)
         cleanup()
         exit(1)
 
 
 def handle_threshold_mode(temp):
-    """Handles the temperature-based threshold mode and returns True if fan speed changed."""
+    """Handles the temperature-based threshold mode."""
     global high_speed_mode
     if temp is not None:
         if temp > TEMP_ON_THRESHOLD and not high_speed_mode:
-            print(
-                f"Temperature ({temp:.2f}°C) exceeded ON threshold ({TEMP_ON_THRESHOLD}°C). "
-                f"Setting fan to {THRESHOLD_ON_DUTY_CYCLE}%."
+            log.info(
+                "Temperature (%.2f°C) exceeded ON threshold (%s°C). Setting fan to %s%%.",
+                temp, TEMP_ON_THRESHOLD, THRESHOLD_ON_DUTY_CYCLE,
             )
             set_fan_speed(THRESHOLD_ON_DUTY_CYCLE)
             high_speed_mode = True
         elif temp < TEMP_OFF_THRESHOLD and high_speed_mode:
-            print(
-                f"Temperature ({temp:.2f}°C) below OFF threshold ({TEMP_OFF_THRESHOLD}°C). "
-                f"Setting fan to {THRESHOLD_OFF_DUTY_CYCLE}%."
+            log.info(
+                "Temperature (%.2f°C) below OFF threshold (%s°C). Setting fan to %s%%.",
+                temp, TEMP_OFF_THRESHOLD, THRESHOLD_OFF_DUTY_CYCLE,
             )
             set_fan_speed(THRESHOLD_OFF_DUTY_CYCLE)
             high_speed_mode = False
 
 
-heating_on = False
-
-
 def handle_heating_mode(temp):
-    """Handles the temperature-based heating mode and returns True if state changed."""
+    """Handles the temperature-based heating mode."""
     global heating_on
     if not HEATING_ENABLED:
         return False
 
     if temp is not None:
         if temp < HEATING_ON_THRESHOLD and not heating_on:
-            print(
-                f"Temperature ({temp:.2f}°C) below heating ON threshold ({HEATING_ON_THRESHOLD}°C). "
-                "Turning heating ON."
+            log.info(
+                "Temperature (%.2f°C) below heating ON threshold (%s°C). Turning heating ON.",
+                temp, HEATING_ON_THRESHOLD,
             )
             lgpio.gpio_write(h, HEATING_GPIO, 1)
             heating_on = True
         elif temp > HEATING_OFF_THRESHOLD and heating_on:
-            print(
-                f"Temperature ({temp:.2f}°C) above heating OFF threshold ({HEATING_OFF_THRESHOLD}°C). "
-                "Turning heating OFF."
+            log.info(
+                "Temperature (%.2f°C) above heating OFF threshold (%s°C). Turning heating OFF.",
+                temp, HEATING_OFF_THRESHOLD,
             )
             lgpio.gpio_write(h, HEATING_GPIO, 0)
             heating_on = False
+
+
+def enter_failsafe():
+    """Puts the controller into a safe state after repeated failed readings.
+
+    Heating is switched off unconditionally: a heater left running on stale data
+    is the worst outcome. The fan is then driven from the CPU temperature alone,
+    so a hot Pi still gets cooled, but a cold box does not get a fan pulling
+    outside air in on the strength of a reading we no longer have.
+    """
+    global failsafe_active, high_speed_mode, heating_on
+
+    first_entry = not failsafe_active
+    failsafe_active = True
+
+    if first_entry:
+        log.error(
+            "Temperature source failed %d times in a row; entering failsafe.",
+            consecutive_failures,
+        )
+
+    if HEATING_ENABLED and heating_on:
+        log.warning("Failsafe: turning heating OFF.")
+        lgpio.gpio_write(h, HEATING_GPIO, 0)
+        heating_on = False
+
+    if STATIC_DUTY_CYCLE is not None:
+        return  # static mode owns the fan, leave it alone
+
+    cpu_temp = get_cpu_temperature()
+    if cpu_temp is None:
+        target = THRESHOLD_ON_DUTY_CYCLE
+        target_high = True
+        reason = "CPU temperature unreadable, assuming hot"
+    elif cpu_temp > FAILSAFE_CPU_TEMP:
+        target = THRESHOLD_ON_DUTY_CYCLE
+        target_high = True
+        reason = f"CPU at {cpu_temp:.2f}°C, above FAILSAFE_CPU_TEMP ({FAILSAFE_CPU_TEMP}°C)"
+    else:
+        target = THRESHOLD_OFF_DUTY_CYCLE
+        target_high = False
+        reason = f"CPU at {cpu_temp:.2f}°C, below FAILSAFE_CPU_TEMP ({FAILSAFE_CPU_TEMP}°C)"
+
+    if first_entry or target != current_duty_cycle:
+        log.warning("Failsafe: %s. Setting fan to %s%%.", reason, target)
+    set_fan_speed(target)
+    high_speed_mode = target_high
+
+
+def leave_failsafe(temp):
+    """Returns to normal operation after the temperature source recovers."""
+    global failsafe_active
+    log.info("Temperature source recovered (%.2f°C); leaving failsafe.", temp)
+    failsafe_active = False
 
 
 def setup():
@@ -147,27 +220,30 @@ def setup():
     try:
         h = lgpio.gpiochip_open(0)
         lgpio.gpio_claim_output(h, PWM_GPIO)
+        claimed_pins.append(PWM_GPIO)
         if HEATING_ENABLED:
             lgpio.gpio_claim_output(h, HEATING_GPIO)
-            print("Claimed HEATING_GPIO pin")
-        print("GPIO setup complete.")
+            claimed_pins.append(HEATING_GPIO)
+            log.info("Claimed HEATING_GPIO pin")
+        log.info("GPIO setup complete.")
     except Exception as e:
-        print(f"Error setting up GPIO: {e}")
+        log.error("Error setting up GPIO: %s", e)
+        cleanup()
         exit(1)
 
 
 def cleanup(signum=None, frame=None):
     """Cleans up GPIO resources."""
-    print("Shutting down gracefully...")
+    log.info("Shutting down gracefully...")
     if h:
         set_fan_speed(THRESHOLD_ON_DUTY_CYCLE)
-        if HEATING_ENABLED:
+        if HEATING_ENABLED and HEATING_GPIO in claimed_pins:
             lgpio.gpio_write(h, HEATING_GPIO, 0)
-            lgpio.gpio_free(h, HEATING_GPIO)
-            print("Released HEATING_GPIO pin")
-        lgpio.gpio_free(h, PWM_GPIO)
+            log.info("Released HEATING_GPIO pin")
+        for pin in claimed_pins:
+            lgpio.gpio_free(h, pin)
         lgpio.gpiochip_close(h)
-        print(f"Set fan speed to THRESHOLD_ON_DUTY_CYCLE ({THRESHOLD_ON_DUTY_CYCLE})")
+        log.info("Set fan speed to THRESHOLD_ON_DUTY_CYCLE (%s)", THRESHOLD_ON_DUTY_CYCLE)
     exit(0)
 
 
@@ -176,11 +252,11 @@ def initialize_threshold_mode():
     global high_speed_mode
     temp = get_temperature()
     if temp and temp > TEMP_ON_THRESHOLD:
-        print(f"Initial temperature is high, starting fan at {THRESHOLD_ON_DUTY_CYCLE}%.")
+        log.info("Initial temperature is high, starting fan at %s%%.", THRESHOLD_ON_DUTY_CYCLE)
         set_fan_speed(THRESHOLD_ON_DUTY_CYCLE)
         high_speed_mode = True
     else:
-        print(f"Setting fan to {THRESHOLD_OFF_DUTY_CYCLE}%.")
+        log.info("Setting fan to %s%%.", THRESHOLD_OFF_DUTY_CYCLE)
         set_fan_speed(THRESHOLD_OFF_DUTY_CYCLE)
     if HEATING_ENABLED:
         handle_heating_mode(temp)
@@ -188,38 +264,61 @@ def initialize_threshold_mode():
 
 def main():
     """Main function."""
+    global consecutive_failures
+
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
     setup()
 
     if STATIC_DUTY_CYCLE is not None:
-        print("Starting static fan control.")
+        log.info("Starting static fan control.")
         handle_static_mode()
     else:
-        print("Starting temperature-based fan control.")
+        log.info("Starting temperature-based fan control.")
         initialize_threshold_mode()
 
     while True:
         temp = get_temperature()
 
         if temp is not None:
+            if failsafe_active:
+                leave_failsafe(temp)
+            consecutive_failures = 0
+
             if STATIC_DUTY_CYCLE is None:
                 handle_threshold_mode(temp)
             handle_heating_mode(temp)
-            fan_status = f"{current_duty_cycle}%"
-            log_message = f"Temp: {temp:.2f}°C, Fan: {fan_status}"
 
+            log_message = f"Temp: {temp:.2f}°C, Fan: {current_duty_cycle}%"
             if HEATING_ENABLED:
                 heating_status = "ON" if heating_on else "OFF"
                 log_message += f", Heating: {heating_status}"
+            log.info(log_message)
 
-            print(log_message)
-        
         else:
-            print("temp was None, skipping this run")
+            consecutive_failures += 1
+            if failsafe_active:
+                log.warning(
+                    "Temperature reading failed (%d consecutive failures, still in failsafe).",
+                    consecutive_failures,
+                )
+            else:
+                log.warning(
+                    "Temperature reading failed (%d/%d before failsafe).",
+                    consecutive_failures, FAILSAFE_AFTER_FAILURES,
+                )
+            if consecutive_failures >= FAILSAFE_AFTER_FAILURES:
+                enter_failsafe()
 
         time.sleep(UPDATE_INTERVAL)
+
 
 if __name__ == "__main__":
     main()
